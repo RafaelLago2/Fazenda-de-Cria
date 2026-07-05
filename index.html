@@ -12,11 +12,11 @@
 <link rel="apple-touch-icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%2314532d'/><text x='32' y='46' font-size='40' text-anchor='middle'>🐂</text></svg>"/>
 <title>🐂 PecuáriaManager</title>
 
-<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -338,10 +338,73 @@ window.HELPERS={
 /* ═══════════════════════════════════════════════════════════════
    SUPABASE — Configuração e wrapper para modo online
    ═══════════════════════════════════════════════════════════════ */
-window.SUPABASE_CONFIG={
+// ═══════════════════════════════════════════════════════════════════
+// SISTEMA DE OPERAÇÕES MÚLTIPLAS
+// Cada operação = um Supabase project diferente (banco isolado)
+// Operações ficam salvas em localStorage e o usuário escolhe qual usar
+// ═══════════════════════════════════════════════════════════════════
+window.OPERATIONS_KEY='pm_operations_v1';
+window.ACTIVE_OPERATION_KEY='pm_active_operation_v1';
+
+// Operação padrão (Fazenda Lago) — sempre presente
+window.DEFAULT_OPERATION={
+  id:'fazenda-lago',
+  name:'Fazenda Lago (principal)',
+  emoji:'🏡',
   url:'https://hvmsxdetpvjfilzxjwrf.supabase.co',
   anonKey:'sb_publishable_SN-HwDAzbnY6s7K1pNz2dA_fnUf_8P9',
+  isDefault:true,
 };
+
+function loadOperations(){
+  try{
+    const raw=localStorage.getItem(window.OPERATIONS_KEY);
+    const ops=raw?JSON.parse(raw):[];
+    // Garantir que a operação padrão sempre exista
+    if(!ops.find(o=>o.id===window.DEFAULT_OPERATION.id)){
+      ops.unshift({...window.DEFAULT_OPERATION});
+      localStorage.setItem(window.OPERATIONS_KEY,JSON.stringify(ops));
+    }
+    return ops;
+  }catch(e){
+    console.error('[ops] erro carregar:',e);
+    return [{...window.DEFAULT_OPERATION}];
+  }
+}
+window.loadOperations=loadOperations;
+
+function saveOperations(ops){
+  try{localStorage.setItem(window.OPERATIONS_KEY,JSON.stringify(ops));}
+  catch(e){console.error('[ops] erro salvar:',e);}
+}
+window.saveOperations=saveOperations;
+
+function getActiveOperationId(){
+  return localStorage.getItem(window.ACTIVE_OPERATION_KEY)||window.DEFAULT_OPERATION.id;
+}
+window.getActiveOperationId=getActiveOperationId;
+
+function getActiveOperation(){
+  const ops=loadOperations();
+  const id=getActiveOperationId();
+  return ops.find(o=>o.id===id)||ops[0]||window.DEFAULT_OPERATION;
+}
+window.getActiveOperation=getActiveOperation;
+
+function setActiveOperation(id){
+  localStorage.setItem(window.ACTIVE_OPERATION_KEY,id);
+}
+window.setActiveOperation=setActiveOperation;
+
+// ═══════════════════════════════════════════════════════════════════
+// SUPABASE CONFIG — agora vem da operação ativa
+// ═══════════════════════════════════════════════════════════════════
+const _activeOp=getActiveOperation();
+window.SUPABASE_CONFIG={
+  url:_activeOp.url,
+  anonKey:_activeOp.anonKey,
+};
+window.ACTIVE_OPERATION=_activeOp;
 
 // Mapeamento de tabelas: a maioria já tem o mesmo nome
 window.SUPA_TABLES=['profiles','farm_settings','pastures','lots','animals','animal_lot_history','animal_exits','births','deaths','health_managements','herbicide_applications','mineral_supplementations','weighings','reproductive_protocols','pregnancy_diagnoses','feces_records','pasture_movements','revenues','costs'];
@@ -355,15 +418,17 @@ window.SUPA_TABLES=['profiles','farm_settings','pastures','lots','animals','anim
     }
     window.SUPA={
       client:supabase.createClient(window.SUPABASE_CONFIG.url,window.SUPABASE_CONFIG.anonKey,{
-        auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false},
+        auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false,storageKey:'pm_supa_'+_activeOp.id},
       }),
       currentSession:null,
       currentProfile:null,
       online:navigator.onLine,
+      operationId:_activeOp.id,
+      operationName:_activeOp.name,
     };
-    // Atualizar status online/offline
     window.addEventListener('online',()=>{window.SUPA.online=true;});
     window.addEventListener('offline',()=>{window.SUPA.online=false;});
+    console.log('[Supabase] inicializado para operação:',_activeOp.name);
   }catch(e){console.error('[Supabase] init erro:',e);window.SUPA=null;}
 })();
 
@@ -5000,8 +5065,129 @@ function ModeSelector({onChoose}){
   </div>;
 }
 
+/* ─── Seletor de Operação (qual Supabase usar) ─── */
+function OperationSelector({onChoose,onBackToMode}){
+  const[ops,setOps]=useState(window.loadOperations());
+  const[showAdd,setShowAdd]=useState(false);
+  const[editing,setEditing]=useState(null);
+  const activeId=window.getActiveOperationId();
+
+  function refresh(){setOps(window.loadOperations());}
+
+  function chooseOp(op){
+    window.setActiveOperation(op.id);
+    onChoose(op);
+  }
+
+  function addOp(data){
+    const ops=window.loadOperations();
+    const id=data.id||('op-'+Date.now());
+    ops.push({...data,id});
+    window.saveOperations(ops);
+    refresh();
+    setShowAdd(false);
+    setEditing(null);
+    alert('✅ Operação "'+data.name+'" adicionada!\n\nAgora clique nela para entrar e fazer login.');
+  }
+
+  function updateOp(id,data){
+    const ops=window.loadOperations();
+    const idx=ops.findIndex(o=>o.id===id);
+    if(idx<0)return;
+    ops[idx]={...ops[idx],...data};
+    window.saveOperations(ops);
+    refresh();
+    setShowAdd(false);
+    setEditing(null);
+  }
+
+  function deleteOp(op){
+    if(op.isDefault){alert('Não é possível excluir a operação principal.');return;}
+    if(!confirm('Remover a operação "'+op.name+'" da lista?\n\nOs dados no Supabase NÃO são apagados, só removemos a referência aqui no app. Você pode adicionar novamente depois.'))return;
+    const ops=window.loadOperations().filter(o=>o.id!==op.id);
+    window.saveOperations(ops);
+    if(activeId===op.id)window.setActiveOperation(window.DEFAULT_OPERATION.id);
+    refresh();
+  }
+
+  return <div style={{minHeight:'100vh',background:'linear-gradient(160deg,#14532d,#166534,#15803d)',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+    <div style={{width:'100%',maxWidth:560}}>
+      <div style={{textAlign:'center',marginBottom:20}}>
+        <div style={{fontSize:48,marginBottom:4}}>🌐</div>
+        <h1 style={{color:'#fff',fontSize:22,fontWeight:700}}>Escolha a Operação</h1>
+        <p style={{color:'rgba(255,255,255,.8)',fontSize:13,marginTop:6}}>Cada operação tem seu próprio banco de dados isolado.</p>
+      </div>
+
+      <div style={{background:'#fff',borderRadius:20,padding:20}}>
+        {ops.map(op=>{
+          const isActive=op.id===activeId;
+          return <div key={op.id} style={{marginBottom:10,border:'2px solid '+(isActive?'#16a34a':'#e5e7eb'),borderRadius:12,overflow:'hidden'}}>
+            <button onClick={()=>chooseOp(op)} style={{width:'100%',padding:16,background:isActive?'#f0fdf4':'#fff',border:'none',cursor:'pointer',textAlign:'left'}}>
+              <div style={{display:'flex',alignItems:'center',gap:14}}>
+                <span style={{fontSize:32}}>{op.emoji||'🏡'}</span>
+                <div style={{flex:1,minWidth:0}}>
+                  <strong style={{fontSize:15,color:'#166534',display:'block'}}>{op.name}</strong>
+                  <span style={{fontSize:11,color:'#6b7280',wordBreak:'break-all'}}>{op.url.replace('https://','').replace('.supabase.co','')}</span>
+                </div>
+                <span style={{color:isActive?'#16a34a':'#9ca3af',fontSize:22}}>›</span>
+              </div>
+            </button>
+            {!op.isDefault&&<div style={{padding:'8px 16px',background:'#f9fafb',display:'flex',gap:6,justifyContent:'flex-end',borderTop:'1px solid #f3f4f6'}}>
+              <button onClick={()=>setEditing(op)} style={{padding:'4px 10px',fontSize:11,background:'#fff',border:'1px solid #d1d5db',borderRadius:6,cursor:'pointer'}}>✏ Editar</button>
+              <button onClick={()=>deleteOp(op)} style={{padding:'4px 10px',fontSize:11,background:'#fff',border:'1px solid #fca5a5',color:'#dc2626',borderRadius:6,cursor:'pointer'}}>× Remover</button>
+            </div>}
+          </div>;
+        })}
+
+        <button onClick={()=>{setEditing(null);setShowAdd(true);}} style={{width:'100%',padding:14,marginTop:6,background:'#fff',border:'2px dashed #93c5fd',color:'#1e40af',borderRadius:12,cursor:'pointer',fontSize:13,fontWeight:600}}>
+          + Adicionar nova operação (outro Supabase)
+        </button>
+
+        <button onClick={onBackToMode} style={{width:'100%',padding:10,marginTop:10,background:'transparent',border:'none',color:'#6b7280',cursor:'pointer',fontSize:12}}>
+          ‹ Voltar para seleção de modo
+        </button>
+      </div>
+    </div>
+
+    <Modal open={showAdd||!!editing} onClose={()=>{setShowAdd(false);setEditing(null);}} title={editing?'Editar Operação':'Nova Operação'} size="lg">
+      <OperationForm initial={editing} onSave={d=>editing?updateOp(editing.id,d):addOp(d)} onCancel={()=>{setShowAdd(false);setEditing(null);}}/>
+    </Modal>
+  </div>;
+}
+
+function OperationForm({initial,onSave,onCancel}){
+  const[f,setF]=useState({name:'',emoji:'🌾',url:'',anonKey:'',...initial});
+  const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  return <>
+    <Alert type="info">
+      📋 <strong>Como conseguir as credenciais:</strong>
+      <ol style={{margin:'6px 0 0 18px',fontSize:12,lineHeight:1.6}}>
+        <li>Acesse <a href="https://supabase.com/dashboard" target="_blank" rel="noopener">supabase.com/dashboard</a></li>
+        <li>Crie um novo projeto (ou abre um existente)</li>
+        <li>Vai em <strong>Settings → API</strong></li>
+        <li>Copia a <strong>Project URL</strong> e a <strong>anon/public key</strong></li>
+        <li>Cola aqui embaixo</li>
+        <li>Rode o SQL <strong>setup-supabase.sql</strong> no SQL Editor desse projeto</li>
+      </ol>
+    </Alert>
+    <FormRow>
+      <Field label="Emoji"><Input value={f.emoji||''} onChange={e=>s('emoji',e.target.value)} placeholder="🌾"/></Field>
+      <Field label="Nome da operação" required hint="Ex: Arrendamento Sul"><Input value={f.name||''} onChange={e=>s('name',e.target.value)} placeholder="Nome amigável"/></Field>
+    </FormRow>
+    <Field label="Project URL" required hint="Ex: https://xyzabc.supabase.co"><Input value={f.url||''} onChange={e=>s('url',e.target.value.trim())} placeholder="https://....supabase.co"/></Field>
+    <Field label="Anon/Public Key" required hint="A chave 'anon' pública, NÃO a service_role"><Textarea value={f.anonKey||''} onChange={e=>s('anonKey',e.target.value.trim())} placeholder="sb_publishable_... ou eyJhbGc..."/></Field>
+    <Alert type="warning">⚠ Use apenas a chave <strong>anon/public</strong>. Nunca cole a chave <strong>service_role</strong> aqui — ela é secreta e dá acesso total.</Alert>
+    <FormActions onSave={()=>{
+      if(!f.name)return alert('Nome obrigatório');
+      if(!f.url||!f.url.includes('supabase.co'))return alert('URL inválida');
+      if(!f.anonKey||f.anonKey.length<20)return alert('Anon key inválida');
+      onSave(f);
+    }} onCancel={onCancel} saveLabel={initial?'Salvar alterações':'Adicionar operação'}/>
+  </>;
+}
+
 /* ─── Login Online (Supabase) ─── */
-function OnlineLogin({onLogin,onBackToMode}){
+function OnlineLogin({onLogin,onBackToMode,activeOp,onChangeOp}){
   const[email,setEmail]=useState('');
   const[pw,setPw]=useState('');
   const[err,setErr]=useState('');
@@ -5022,10 +5208,11 @@ function OnlineLogin({onLogin,onBackToMode}){
 
   return <div style={{minHeight:'100vh',background:'linear-gradient(160deg,#0c4a6e,#1e40af,#1d4ed8)',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
     <div style={{width:'100%',maxWidth:400}}>
-      <div style={{textAlign:'center',marginBottom:28}}>
-        <div style={{fontSize:60,marginBottom:4}}>🌐</div>
-        <h1 style={{color:'#fff',fontSize:24,fontWeight:700}}>PecuáriaManager</h1>
-        <p style={{color:'rgba(255,255,255,.7)',fontSize:13,marginTop:6}}>Modo Online — Em Rede</p>
+      <div style={{textAlign:'center',marginBottom:20}}>
+        <div style={{fontSize:50,marginBottom:4}}>{activeOp?.emoji||'🌐'}</div>
+        <h1 style={{color:'#fff',fontSize:22,fontWeight:700}}>PecuáriaManager</h1>
+        <p style={{color:'rgba(255,255,255,.85)',fontSize:13,marginTop:4}}>{activeOp?.name||'Modo Online'}</p>
+        {onChangeOp&&<button type="button" onClick={onChangeOp} style={{marginTop:6,background:'rgba(255,255,255,.15)',border:'1px solid rgba(255,255,255,.25)',color:'#fff',padding:'4px 12px',borderRadius:6,cursor:'pointer',fontSize:11}}>↔ Trocar operação</button>}
       </div>
       <div style={{background:'#fff',borderRadius:20,padding:28}}>
         <h2 style={{fontSize:16,fontWeight:600,marginBottom:20}}>Entrar</h2>
@@ -5038,9 +5225,8 @@ function OnlineLogin({onLogin,onBackToMode}){
         </form>
         <div style={{marginTop:20,padding:12,background:'#eff6ff',borderRadius:8,border:'1px solid #bfdbfe'}}>
           <p style={{fontSize:11,color:'#1e3a8a',lineHeight:1.5}}>
-            🌐 <strong>Modo online ativo.</strong><br/>
-            Use o e-mail e senha cadastrados no painel do Supabase pelo administrador da fazenda.<br/>
-            <strong>1ª vez?</strong> O admin cria sua conta no Supabase &gt; Authentication &gt; Users.
+            🌐 <strong>{activeOp?.name||'Operação ativa'}</strong><br/>
+            Use o e-mail e senha cadastrados no Supabase desta operação.
           </p>
         </div>
         <button type="button" onClick={onBackToMode} style={{display:'block',margin:'14px auto 0',background:'none',border:'none',color:'#6b7280',cursor:'pointer',fontSize:11,textDecoration:'underline'}}>← Voltar ao seletor de modo</button>
@@ -5851,7 +6037,7 @@ const ONLINE_NAV=[
 const ONLINE_MOBILE_QUICK=['online-dashboard','online-births','online-inventory','online-pastures','online-settings'];
 
 /* ─── Layout simplificado para o modo online (provisório) ─── */
-function OnlineLayout({user,page,onNav,onLogout,children}){
+function OnlineLayout({user,page,onNav,onLogout,onSwitchOp,children}){
   const[sideOpen,setSideOpen]=useState(false);
   const[collapsed,setCollapsed]=useState(()=>{
     try{const v=localStorage.getItem('pm_sidebar_collapsed');return v==='1';}catch{return false;}
@@ -5865,11 +6051,11 @@ function OnlineLayout({user,page,onNav,onLogout,children}){
 
   return <div style={{display:'flex',minHeight:'100vh',background:'#f4f6f0'}}>
     <aside style={{width:sidebarWidth,flexShrink:0,background:'#0c4a6e',display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',overflowY:'auto',transition:'width 0.2s'}} className="pm-sidebar">
-      <OnlineSidebar user={user} nav={nav} page={page} onNav={onNav} onLogout={onLogout} collapsed={collapsed} onToggleCollapsed={toggleCollapsed}/>
+      <OnlineSidebar user={user} nav={nav} page={page} onNav={onNav} onLogout={onLogout} onSwitchOp={onSwitchOp} collapsed={collapsed} onToggleCollapsed={toggleCollapsed}/>
     </aside>
     {sideOpen&&<div onClick={()=>setSideOpen(false)} style={{position:'fixed',inset:0,zIndex:500,background:'rgba(0,0,0,.55)'}}>
       <aside onClick={e=>e.stopPropagation()} style={{width:260,background:'#0c4a6e',height:'100%',overflowY:'auto'}}>
-        <OnlineSidebar user={user} nav={nav} page={page} onNav={id=>{onNav(id);setSideOpen(false);}} onLogout={onLogout} collapsed={false}/>
+        <OnlineSidebar user={user} nav={nav} page={page} onNav={id=>{onNav(id);setSideOpen(false);}} onLogout={onLogout} onSwitchOp={onSwitchOp} collapsed={false}/>
       </aside>
     </div>}
     <main style={{flex:1,minHeight:'100vh',minWidth:0}}>
@@ -5894,13 +6080,15 @@ function OnlineLayout({user,page,onNav,onLogout,children}){
   </div>;
 }
 
-function OnlineSidebar({user,nav,page,onNav,onLogout,collapsed,onToggleCollapsed}){
+function OnlineSidebar({user,nav,page,onNav,onLogout,onSwitchOp,collapsed,onToggleCollapsed}){
+  const op=window.ACTIVE_OPERATION||window.DEFAULT_OPERATION;
   return <>
     <div style={{padding:collapsed?'16px 8px 10px':'18px 16px 10px',borderBottom:'1px solid rgba(255,255,255,.08)',display:'flex',flexDirection:collapsed?'column':'row',alignItems:collapsed?'center':'flex-start',justifyContent:'space-between',gap:8}}>
       <div style={{flex:1,minWidth:0,overflow:'hidden'}}>
-        <p style={{color:'#fff',fontWeight:700,fontSize:collapsed?22:16,marginBottom:collapsed?0:4,textAlign:collapsed?'center':'left'}}>{collapsed?'🐂':'🌐 PecuáriaManager'}</p>
+        <p style={{color:'#fff',fontWeight:700,fontSize:collapsed?22:16,marginBottom:collapsed?0:4,textAlign:collapsed?'center':'left'}}>{collapsed?(op.emoji||'🐂'):'🌐 PecuáriaManager'}</p>
         {!collapsed&&<>
-          <p style={{color:'rgba(255,255,255,.55)',fontSize:12,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{user.name||user.email}</p>
+          <p style={{color:'rgba(255,255,255,.85)',fontSize:11,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',fontWeight:600}}>{op.emoji||'🏡'} {op.name}</p>
+          <p style={{color:'rgba(255,255,255,.55)',fontSize:11,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',marginTop:2}}>{user.name||user.email}</p>
           <span style={{display:'inline-block',marginTop:6,padding:'2px 10px',borderRadius:99,fontSize:10,fontWeight:700,background:user.role==='admin'?'#f59e0b':'#16a34a',color:'#fff'}}>
             {user.role==='admin'?'★ Administrador':'Colaborador'}
           </span>
@@ -5920,7 +6108,8 @@ function OnlineSidebar({user,nav,page,onNav,onLogout,collapsed,onToggleCollapsed
         </button>;
       })}
     </div>
-    <div style={{padding:collapsed?'12px 6px':'12px 16px',borderTop:'1px solid rgba(255,255,255,.08)'}}>
+    <div style={{padding:collapsed?'12px 6px':'12px 16px',borderTop:'1px solid rgba(255,255,255,.08)',display:'flex',flexDirection:'column',gap:6}}>
+      {onSwitchOp&&<button onClick={onSwitchOp} title="Trocar operação (outra fazenda/arrendamento)" style={{width:'100%',padding:8,background:'rgba(96,165,250,.15)',border:'1px solid rgba(96,165,250,.3)',borderRadius:8,color:'#dbeafe',cursor:'pointer',fontSize:collapsed?14:11}}>{collapsed?'↔':'↔ Trocar operação'}</button>}
       <button onClick={onLogout} title="Sair" style={{width:'100%',padding:8,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',borderRadius:8,color:'rgba(255,255,255,.65)',cursor:'pointer',fontSize:collapsed?16:12}}>{collapsed?'⏻':'← Sair'}</button>
     </div>
   </>;
@@ -5947,6 +6136,59 @@ function OnlineInventory({user,onNav}){
   const[editing,setEditing]=useState(null);
   const[detail,setDetail]=useState(null);
   const[rev,setRev]=useState(0);
+
+  // SELEÇÃO MÚLTIPLA para transferência em lote
+  const[selectionMode,setSelectionMode]=useState(false);
+  const[selected,setSelected]=useState({}); // {animalId: true}
+  const[showBulkTransfer,setShowBulkTransfer]=useState(false);
+
+  function toggleSelect(id){
+    setSelected(p=>{const n={...p};if(n[id])delete n[id];else n[id]=true;return n;});
+  }
+  function selectAllVisible(visibleIds){
+    const sel={};visibleIds.forEach(id=>{sel[id]=true;});setSelected(sel);
+  }
+  function clearSelection(){setSelected({});}
+  function exitSelectionMode(){setSelectionMode(false);setSelected({});}
+
+  async function bulkTransfer(targetLotId,notes){
+    const ids=Object.keys(selected);
+    if(ids.length===0){alert('Nenhum animal selecionado.');return;}
+    const targetLot=lots.find(l=>l.id===targetLotId);
+    const targetName=targetLot?targetLot.name:'(sem lote)';
+    if(!confirm('Transferir '+ids.length+' animal(is) para o lote "'+targetName+'"?'))return;
+
+    const today=new Date().toISOString().split('T')[0];
+    const ok=[];const errs=[];
+    for(const id of ids){
+      const a=items.find(x=>x.id===id);
+      if(!a){errs.push({id,error:'animal não encontrado'});continue;}
+      try{
+        const fromLot=a.lot_id;
+        // Atualiza o animal
+        await window.SupaDB.update('animals',id,{lot_id:targetLotId||null});
+        // Registra histórico (se a tabela existir)
+        try{
+          await window.SupaDB.insert('animal_lot_history',{
+            animal_id:a.identifier,
+            from_lot_id:fromLot||null,
+            to_lot_id:targetLotId||null,
+            date:today,
+            notes:notes||'Transferência em lote',
+          });
+        }catch(e){console.warn('[bulk] histórico não registrado:',e.message);}
+        ok.push(a.identifier);
+      }catch(e){errs.push({id:a.identifier,error:e.message});}
+    }
+
+    setShowBulkTransfer(false);
+    exitSelectionMode();
+    setRev(r=>r+1);
+
+    let msg='✅ '+ok.length+' animal(is) transferido(s) para "'+targetName+'"';
+    if(errs.length>0)msg+='\n⚠ '+errs.length+' erro(s)';
+    alert(msg);
+  }
 
   useEffect(()=>{
     let cancelled=false;
@@ -6033,8 +6275,18 @@ function OnlineInventory({user,onNav}){
     catch(e){alert('Erro: '+e.message);}
   }
 
-  return <OnlinePage title="Inventário" subtitle={stats.ativos+' ativos · '+stats.saidos+' saídos'} icon="📋" loading={loading} error={err}
-    action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Animal</Btn>}>
+  return <OnlinePage title="Inventário" subtitle={stats.ativos+' ativos · '+stats.saidos+' saídos'+(selectionMode?' · '+Object.keys(selected).length+' selecionados':'')} icon="📋" loading={loading} error={err}
+    action={selectionMode?
+      <div style={{display:'flex',gap:6}}>
+        <Btn size="sm" variant="secondary" onClick={exitSelectionMode}>✕ Cancelar</Btn>
+        <Btn size="sm" onClick={()=>{if(Object.keys(selected).length===0){alert('Selecione ao menos 1 animal.');return;}setShowBulkTransfer(true);}}>↔ Transferir ({Object.keys(selected).length})</Btn>
+      </div>
+    :
+      <div style={{display:'flex',gap:6}}>
+        <Btn size="sm" variant="secondary" onClick={()=>setSelectionMode(true)}>☑ Selecionar</Btn>
+        <Btn size="sm" onClick={()=>{setEditing(null);setShowForm(true);}}>+ Animal</Btn>
+      </div>
+    }>
 
     {duplicates.length>0&&<Alert type="error">
       <strong>⚠️ {duplicates.length} identificador(es) duplicado(s) detectado(s):</strong>
@@ -6088,24 +6340,35 @@ function OnlineInventory({user,onNav}){
         </Select>
       </div>
     </Card>
+    {selectionMode&&<Alert type="info">
+      ☑ <strong>Modo de seleção ativo.</strong> Toque nos animais pra selecionar. {Object.keys(selected).length} selecionado(s) de {filtered.length} visíveis.
+      <div style={{display:'flex',gap:6,marginTop:8,flexWrap:'wrap'}}>
+        <button onClick={()=>selectAllVisible(filtered.map(a=>a.id))} style={{padding:'4px 10px',fontSize:11,background:'#dbeafe',border:'1px solid #93c5fd',borderRadius:6,cursor:'pointer'}}>Todos visíveis ({filtered.length})</button>
+        <button onClick={clearSelection} style={{padding:'4px 10px',fontSize:11,background:'#fff',border:'1px solid #d1d5db',borderRadius:6,cursor:'pointer'}}>Limpar seleção</button>
+      </div>
+    </Alert>}
     <Card>
       {filtered.length===0?<EmptyState icon="🐂" text={query?'Nenhum animal encontrado':'Sem animais ainda'} action={!query&&<Btn onClick={()=>setShowForm(true)}>Cadastrar primeiro</Btn>}/>:
         filtered.map(a=>{
           const lot=lots.find(l=>l.id===a.lot_id);
           const saiu=a.status==='saiu';
           const isDup=duplicates.includes(a.identifier);
-          return <ListItem key={a.id} onClick={()=>setDetail(a)} style={saiu?{opacity:.7,background:'#f9fafb'}:isDup?{background:'#fef2f2',borderLeft:'3px solid #dc2626'}:{}}>
-            <div>
-              <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-                <strong style={{fontSize:13,textDecoration:saiu?'line-through':'none'}}>{a.identifier}</strong>
-                {isDup&&<Badge color="red">⚠ Duplicado</Badge>}
-                {saiu&&<Badge color="red">📤 Saiu</Badge>}
-                {!saiu&&<Badge color={a.sex==='Macho'?'blue':'red'}>{a.sex}</Badge>}
-                {!saiu&&<Badge color="gray">{a.type}</Badge>}
+          const sel=!!selected[a.id];
+          return <ListItem key={a.id} onClick={()=>{if(selectionMode){if(saiu)return;toggleSelect(a.id);}else setDetail(a);}} style={saiu?{opacity:.7,background:'#f9fafb'}:sel?{background:'#dcfce7',borderLeft:'3px solid #16a34a'}:isDup?{background:'#fef2f2',borderLeft:'3px solid #dc2626'}:{}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              {selectionMode&&!saiu&&<input type="checkbox" checked={sel} onChange={()=>{}} style={{width:20,height:20,flexShrink:0,accentColor:'#16a34a'}}/>}
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                  <strong style={{fontSize:13,textDecoration:saiu?'line-through':'none'}}>{a.identifier}</strong>
+                  {isDup&&<Badge color="red">⚠ Duplicado</Badge>}
+                  {saiu&&<Badge color="red">📤 Saiu</Badge>}
+                  {!saiu&&<Badge color={a.sex==='Macho'?'blue':'red'}>{a.sex}</Badge>}
+                  {!saiu&&<Badge color="gray">{a.type}</Badge>}
+                </div>
+                <p style={{fontSize:11,color:'#6b7280',marginTop:2}}>
+                  {saiu?'Saiu em '+H.fmtDate(a.exit_date):a.race+' · '+(lot?.name||'Sem lote')}
+                </p>
               </div>
-              <p style={{fontSize:11,color:'#6b7280',marginTop:2}}>
-                {saiu?'Saiu em '+H.fmtDate(a.exit_date):a.race+' · '+(lot?.name||'Sem lote')}
-              </p>
             </div>
           </ListItem>;
         })
@@ -6117,7 +6380,36 @@ function OnlineInventory({user,onNav}){
     <Modal open={!!detail} onClose={()=>setDetail(null)} title={detail?detail.identifier:''} size="lg">
       {detail&&<OnlineAnimalDetail animal={detail} lots={lots} user={user} onEdit={()=>{setEditing(detail);setShowForm(true);setDetail(null);}} onDelete={()=>del(detail.id)} onClose={()=>setDetail(null)}/>}
     </Modal>
+    <Modal open={showBulkTransfer} onClose={()=>setShowBulkTransfer(false)} title="↔ Transferir em lote" size="md">
+      <BulkTransferForm count={Object.keys(selected).length} lots={lots} onSave={bulkTransfer} onCancel={()=>setShowBulkTransfer(false)}/>
+    </Modal>
   </OnlinePage>;
+}
+
+function BulkTransferForm({count,lots,onSave,onCancel}){
+  const[targetLot,setTargetLot]=useState('');
+  const[notes,setNotes]=useState('');
+  return <>
+    <Alert type="info">📋 Você vai transferir <strong>{count} animal(is)</strong> para outro lote de uma só vez.</Alert>
+    <Field label="Lote de destino" required>
+      <Select value={targetLot} onChange={e=>setTargetLot(e.target.value)}>
+        <option value="">— Selecione o lote de destino —</option>
+        <option value="__no_lot__">(Remover lote — deixar sem lote)</option>
+        {lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
+      </Select>
+    </Field>
+    <Field label="Observação (opcional)" hint="Aparece no histórico do animal">
+      <Input value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Ex: Mudança para pastagem de inverno"/>
+    </Field>
+    <FormActions
+      onSave={()=>{
+        if(!targetLot){alert('Selecione o lote de destino.');return;}
+        onSave(targetLot==='__no_lot__'?null:targetLot,notes);
+      }}
+      onCancel={onCancel}
+      saveLabel={'Transferir '+count+' '+(count===1?'animal':'animais')}
+    />
+  </>;
 }
 
 function OnlineAnimalForm({initial,lots,onSave,onCancel}){
@@ -6208,10 +6500,14 @@ function OnlineAnimalDetail({animal,lots,user,onEdit,onDelete,onClose}){
 /* ─── PASTOS ONLINE ─── */
 function OnlinePastures({user}){
   const{data:items,loading,error,reload}=useSupaQuery('pastures');
+  const{data:lots}=useSupaQuery('lots');
+  const{data:animals}=useSupaQuery('animals');
+  const{data:movements}=useSupaQuery('pasture_movements',{order:{column:'entry_date',ascending:false}});
   const[showForm,setShowForm]=useState(false);
   const[editing,setEditing]=useState(null);
   const[query,setQuery]=useState('');
   const[filterStatus,setFilterStatus]=useState('all');
+  const[detail,setDetail]=useState(null);
 
   async function save(data){
     try{
@@ -6227,49 +6523,277 @@ function OnlinePastures({user}){
     catch(e){alert('Erro: '+e.message);}
   }
 
-  const filtered=items.filter(p=>{
-    if(filterStatus!=='all'&&p.status!==filterStatus)return false;
+  // CALCULAR analytics por pasto
+  function analyzePasture(p){
+    // Lotes que ESTÃO no pasto (entry sem exit)
+    const activeMovs=movements.filter(m=>m.pasture_id===p.id&&!m.exit_date);
+    const activeLots=activeMovs.map(m=>{
+      const lot=lots.find(l=>l.id===m.lot_id);
+      const animalsInLot=animals.filter(a=>a.lot_id===m.lot_id&&(a.status||'ativo')==='ativo');
+      const days=m.entry_date?Math.floor((new Date()-new Date(m.entry_date+'T12:00:00'))/(1000*60*60*24)):0;
+      return{lot,mov:m,animals:animalsInLot.length,days};
+    });
+    // Lotes que tinham pasto cadastrado direto (sem movement record)
+    const lotsDirect=lots.filter(l=>l.pasture_id===p.id&&!activeMovs.find(m=>m.lot_id===l.id));
+    lotsDirect.forEach(l=>{
+      const animalsInLot=animals.filter(a=>a.lot_id===l.id&&(a.status||'ativo')==='ativo');
+      if(animalsInLot.length>0){
+        activeLots.push({lot:l,mov:null,animals:animalsInLot.length,days:null});
+      }
+    });
+
+    // Histórico (movements com exit_date)
+    const history=movements.filter(m=>m.pasture_id===p.id&&m.exit_date).map(m=>{
+      const lot=lots.find(l=>l.id===m.lot_id);
+      const entryD=new Date(m.entry_date+'T12:00:00');
+      const exitD=new Date(m.exit_date+'T12:00:00');
+      const days=Math.floor((exitD-entryD)/(1000*60*60*24));
+      return{lot,mov:m,days};
+    }).sort((a,b)=>(b.mov.exit_date||'').localeCompare(a.mov.exit_date||''));
+
+    // Total animais hoje
+    const totalAnimals=activeLots.reduce((s,x)=>s+x.animals,0);
+    // Em uso? (qualquer lote ativo com animais)
+    const inUse=totalAnimals>0;
+    // Última saída (pra calcular dias em descanso)
+    let restDays=null;
+    if(!inUse&&history.length>0){
+      const lastExit=history[0].mov.exit_date;
+      if(lastExit)restDays=Math.floor((new Date()-new Date(lastExit+'T12:00:00'))/(1000*60*60*24));
+    }
+    return{activeLots,history,totalAnimals,inUse,restDays};
+  }
+
+  const enriched=useMemo(()=>items.map(p=>({...p,_analysis:analyzePasture(p)})),[items,lots,animals,movements]);
+
+  const filtered=enriched.filter(p=>{
+    if(filterStatus==='em_uso'&&!p._analysis.inUse)return false;
+    if(filterStatus==='vazio'&&p._analysis.inUse)return false;
+    if(filterStatus!=='all'&&filterStatus!=='em_uso'&&filterStatus!=='vazio'&&p.status!==filterStatus)return false;
     if(query&&!(p.name||'').toLowerCase().includes(query.toLowerCase()))return false;
     return true;
+  }).sort((a,b)=>{
+    // Em uso primeiro
+    if(a._analysis.inUse!==b._analysis.inUse)return a._analysis.inUse?-1:1;
+    return (a.name||'').localeCompare(b.name||'');
   });
-  const totalHa=items.reduce((s,p)=>s+(parseFloat(p.area_ha)||0),0);
 
-  return <OnlinePage title="Pastos" subtitle={items.length+' pastos · '+totalHa.toFixed(2)+' ha total'} icon="🌿" loading={loading} error={error}
+  const totalHa=items.reduce((s,p)=>s+(parseFloat(p.area_ha)||0),0);
+  const emUso=enriched.filter(p=>p._analysis.inUse).length;
+  const vazios=enriched.filter(p=>!p._analysis.inUse).length;
+  const totalAnimaisCampo=enriched.reduce((s,p)=>s+p._analysis.totalAnimals,0);
+
+  return <OnlinePage title="Pastos" subtitle={items.length+' pastos · '+totalHa.toFixed(2)+' ha · '+totalAnimaisCampo+' animais no campo'} icon="🌿" loading={loading} error={error}
     action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Novo</Btn>}>
-    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
-      <StatCard label="Área total" value={totalHa.toFixed(2)+' ha'} color="green" icon="📐"/>
-      <StatCard label="Ativos" value={items.filter(p=>p.status==='Ativo').length} color="green"/>
+
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:12}}>
+      <StatCard label="Em uso" value={emUso} color="green" icon="🟢"/>
+      <StatCard label="Vazios" value={vazios} color="amber" icon="⚪"/>
+      <StatCard label="Área total" value={totalHa.toFixed(0)+' ha'} color="blue" icon="📐"/>
     </div>
+
     <Card style={{marginBottom:12,padding:12}}>
       <Input value={query} onChange={e=>setQuery(e.target.value)} placeholder="🔎 Buscar pasto..." style={{marginBottom:8}}/>
       <Select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)}>
-        <option value="all">Todos os status</option>
-        {H.PST.map(s=><option key={s}>{s}</option>)}
+        <option value="all">Todos ({enriched.length})</option>
+        <option value="em_uso">🟢 Em uso ({emUso})</option>
+        <option value="vazio">⚪ Vazios/Em descanso ({vazios})</option>
+        {H.PST.map(s=><option key={s} value={s}>{s}</option>)}
       </Select>
     </Card>
-    <Card>
-      {filtered.length===0?<EmptyState icon="🌿" text={query?'Nenhum pasto encontrado':'Nenhum pasto cadastrado'}/>:
-        filtered.map(p=>
-          <ListItem key={p.id} onClick={()=>{setEditing(p);setShowForm(true);}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
-              <div>
-                <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-                  <strong style={{fontSize:13}}>{p.name}</strong>
-                  <Badge color={p.status==='Ativo'?'green':'amber'}>{p.status}</Badge>
-                  {p.area_ha&&<Badge color="blue">{p.area_ha} ha</Badge>}
-                </div>
-                <p style={{fontSize:11,color:'#6b7280',marginTop:2}}>Cap: {p.capacity||'—'} {p.description?'· '+p.description:''}</p>
+
+    {filtered.length===0?<EmptyState icon="🌿" text={query?'Nenhum pasto encontrado':'Nenhum pasto cadastrado'}/>:
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))',gap:10}}>
+        {filtered.map(p=>{
+          const a=p._analysis;
+          const cap=p.capacity?parseInt(p.capacity):null;
+          const lotacao=cap&&cap>0?Math.round((a.totalAnimals/cap)*100):null;
+          return <Card key={p.id} onClick={()=>setDetail(p)} style={{cursor:'pointer',borderLeft:'4px solid '+(a.inUse?'#16a34a':a.restDays!==null?'#f59e0b':'#9ca3af'),padding:0}}>
+            <div style={{padding:'12px 14px',background:a.inUse?'linear-gradient(to right,#f0fdf4,#fff)':'#fff'}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}}>
+                <strong style={{fontSize:14}}>{a.inUse?'🟢':'⚪'} {p.name}</strong>
+                {p.area_ha&&<Badge color="blue">{p.area_ha} ha</Badge>}
               </div>
-              {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(p.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
+              {a.inUse?
+                <div>
+                  <p style={{fontSize:12,color:'#166534',fontWeight:600}}>🐂 {a.totalAnimals} animais no campo</p>
+                  {a.activeLots.map((al,i)=>
+                    <p key={i} style={{fontSize:11,color:'#6b7280',marginTop:3}}>
+                      • <strong>{al.lot?.name||'(lote sem nome)'}</strong>: {al.animals} cab {al.days!==null?'· '+al.days+'d':''}
+                    </p>
+                  )}
+                  {lotacao!==null&&<p style={{fontSize:11,marginTop:4,color:lotacao>100?'#dc2626':lotacao>80?'#f59e0b':'#16a34a',fontWeight:600}}>
+                    📊 Lotação: {lotacao}% {cap?'('+a.totalAnimals+'/'+cap+')':''}
+                  </p>}
+                </div>
+              :
+                <div>
+                  {a.restDays!==null?
+                    <p style={{fontSize:12,color:'#92400e',fontWeight:600}}>💤 Em descanso há {a.restDays} dia{a.restDays===1?'':'s'}</p>
+                  :
+                    <p style={{fontSize:12,color:'#6b7280'}}>⚪ Sem histórico de uso</p>
+                  }
+                  {a.history.length>0&&<p style={{fontSize:11,color:'#6b7280',marginTop:3}}>📜 {a.history.length} uso(s) anterior(es)</p>}
+                </div>
+              }
             </div>
-          </ListItem>
-        )
-      }
-    </Card>
+          </Card>;
+        })}
+      </div>
+    }
+
     <Modal open={showForm} onClose={()=>{setShowForm(false);setEditing(null);}} title={editing?'Editar Pasto':'Novo Pasto'}>
       <OnlinePastureForm initial={editing} onSave={save} onCancel={()=>{setShowForm(false);setEditing(null);}}/>
     </Modal>
+
+    <Modal open={!!detail} onClose={()=>setDetail(null)} title={detail?'🌿 '+detail.name:''} size="lg">
+      {detail&&<OnlinePastureDetail pasture={detail} lots={lots} animals={animals} movements={movements} user={user}
+        onEdit={()=>{setEditing(detail);setShowForm(true);setDetail(null);}}
+        onDelete={()=>{del(detail.id);setDetail(null);}}
+        onMovementSaved={()=>{reload();setDetail({...detail});}}
+        onClose={()=>setDetail(null)}
+      />}
+    </Modal>
   </OnlinePage>;
+}
+
+function OnlinePastureDetail({pasture,lots,animals,movements,user,onEdit,onDelete,onMovementSaved,onClose}){
+  const[showMovForm,setShowMovForm]=useState(false);
+
+  // Recalcular analytics dentro do detalhe
+  const activeMovs=movements.filter(m=>m.pasture_id===pasture.id&&!m.exit_date);
+  const activeData=activeMovs.map(m=>{
+    const lot=lots.find(l=>l.id===m.lot_id);
+    const an=animals.filter(a=>a.lot_id===m.lot_id&&(a.status||'ativo')==='ativo').length;
+    const days=m.entry_date?Math.floor((new Date()-new Date(m.entry_date+'T12:00:00'))/(1000*60*60*24)):0;
+    return{lot,mov:m,animals:an,days};
+  });
+  const history=movements.filter(m=>m.pasture_id===pasture.id&&m.exit_date).map(m=>{
+    const lot=lots.find(l=>l.id===m.lot_id);
+    const entryD=new Date(m.entry_date+'T12:00:00');
+    const exitD=new Date(m.exit_date+'T12:00:00');
+    const days=Math.floor((exitD-entryD)/(1000*60*60*24));
+    return{lot,mov:m,days};
+  }).sort((a,b)=>(b.mov.exit_date||'').localeCompare(a.mov.exit_date||''));
+
+  const inUse=activeData.length>0;
+  let restDays=null;
+  if(!inUse&&history.length>0&&history[0].mov.exit_date){
+    restDays=Math.floor((new Date()-new Date(history[0].mov.exit_date+'T12:00:00'))/(1000*60*60*24));
+  }
+  // Estatísticas históricas
+  const totalDaysUsed=history.reduce((s,h)=>s+(h.days||0),0);
+  const avgStay=history.length>0?Math.round(totalDaysUsed/history.length):0;
+
+  async function registrarSaida(movId){
+    if(!confirm('Registrar SAÍDA do lote? (data: hoje)'))return;
+    const today=new Date().toISOString().split('T')[0];
+    try{
+      await window.SupaDB.update('pasture_movements',movId,{exit_date:today});
+      onMovementSaved();
+    }catch(e){alert('Erro: '+e.message);}
+  }
+
+  async function novaEntrada(data){
+    try{
+      await window.SupaDB.insert('pasture_movements',{
+        pasture_id:pasture.id,
+        lot_id:data.lot_id,
+        entry_date:data.entry_date,
+        notes:data.notes||null,
+      });
+      setShowMovForm(false);
+      onMovementSaved();
+    }catch(e){alert('Erro: '+e.message);}
+  }
+
+  return <>
+    {/* Cabeçalho com info do pasto */}
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:14,fontSize:12}}>
+      <Info label="Status" value={pasture.status||'Ativo'}/>
+      <Info label="Área" value={pasture.area_ha?pasture.area_ha+' ha':'—'}/>
+      <Info label="Capacidade" value={pasture.capacity||'—'}/>
+      <Info label="Em uso?" value={inUse?'🟢 Sim ('+activeData.reduce((s,a)=>s+a.animals,0)+' animais)':restDays!==null?'💤 Descanso há '+restDays+'d':'⚪ Vazio'}/>
+    </div>
+    {pasture.description&&<p style={{fontSize:12,color:'#6b7280',marginBottom:12,padding:8,background:'#f9fafb',borderRadius:6}}>{pasture.description}</p>}
+
+    {/* OCUPAÇÃO ATUAL */}
+    <Card style={{marginBottom:12}}>
+      <CardHeader title="🐂 Ocupação atual" action={<Btn size="sm" onClick={()=>setShowMovForm(true)}>+ Registrar entrada</Btn>}/>
+      {activeData.length===0?
+        <div style={{padding:16,textAlign:'center',color:'#6b7280',fontSize:12}}>
+          ⚪ Nenhum lote no pasto agora
+          {restDays!==null&&<><br/><strong style={{color:'#92400e'}}>💤 Em descanso há {restDays} dia{restDays===1?'':'s'}</strong></>}
+        </div>
+      :
+        activeData.map((a,i)=><ListItem key={i}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <div>
+              <strong style={{fontSize:13}}>{a.lot?.name||'(lote desconhecido)'}</strong>
+              <p style={{fontSize:11,color:'#6b7280'}}>🐮 {a.animals} animais · {a.days} dia{a.days===1?'':'s'} no pasto</p>
+              {a.mov?.entry_date&&<p style={{fontSize:10,color:'#9ca3af'}}>Entrou em {H.fmtDate(a.mov.entry_date)}</p>}
+            </div>
+            {a.mov&&<Btn size="sm" variant="secondary" onClick={()=>registrarSaida(a.mov.id)}>↗ Saída</Btn>}
+          </div>
+        </ListItem>)
+      }
+    </Card>
+
+    {/* HISTÓRICO */}
+    {history.length>0&&<Card style={{marginBottom:12}}>
+      <CardHeader title={'📜 Histórico de uso ('+history.length+')'}/>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,padding:'10px 14px',background:'#f9fafb',borderBottom:'1px solid #e5e7eb',fontSize:11}}>
+        <div><strong>Total de dias em uso:</strong> {totalDaysUsed}</div>
+        <div><strong>Estadia média:</strong> {avgStay} dia{avgStay===1?'':'s'}</div>
+      </div>
+      <div style={{maxHeight:260,overflowY:'auto'}}>
+        {history.map((h,i)=><ListItem key={i}>
+          <div>
+            <strong style={{fontSize:12}}>{h.lot?.name||'(lote)'}</strong> <Badge color="gray">{h.days} dias</Badge>
+            <p style={{fontSize:10,color:'#6b7280'}}>{H.fmtDate(h.mov.entry_date)} → {H.fmtDate(h.mov.exit_date)}</p>
+            {h.mov.notes&&<p style={{fontSize:10,color:'#9ca3af',fontStyle:'italic'}}>{h.mov.notes}</p>}
+          </div>
+        </ListItem>)}
+      </div>
+    </Card>}
+
+    <div style={{display:'flex',gap:8,marginTop:12}}>
+      <Btn onClick={onEdit} style={{flex:1}}>Editar pasto</Btn>
+      {user.role==='admin'&&<Btn variant="danger" onClick={onDelete}>Excluir</Btn>}
+      <Btn variant="secondary" onClick={onClose}>Fechar</Btn>
+    </div>
+
+    <Modal open={showMovForm} onClose={()=>setShowMovForm(false)} title={'Registrar entrada em '+pasture.name}>
+      <MovementEntryForm lots={lots} onSave={novaEntrada} onCancel={()=>setShowMovForm(false)}/>
+    </Modal>
+  </>;
+}
+
+function MovementEntryForm({lots,onSave,onCancel}){
+  const[f,setF]=useState({lot_id:'',entry_date:TODAY,notes:''});
+  const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  return <>
+    <Field label="Lote que está entrando" required>
+      <Select value={f.lot_id} onChange={e=>s('lot_id',e.target.value)}>
+        <option value="">— Selecione o lote —</option>
+        {lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
+      </Select>
+    </Field>
+    <Field label="Data de entrada" required>
+      <Input type="date" value={f.entry_date} onChange={e=>s('entry_date',e.target.value)}/>
+    </Field>
+    <Field label="Observações">
+      <Textarea value={f.notes} onChange={e=>s('notes',e.target.value)} placeholder="Ex: Pastagem nova, rotação semanal..."/>
+    </Field>
+    <FormActions
+      onSave={()=>{
+        if(!f.lot_id){alert('Selecione um lote.');return;}
+        onSave(f);
+      }}
+      onCancel={onCancel}
+      saveLabel="Registrar entrada"
+    />
+  </>;
 }
 
 function OnlinePastureForm({initial,onSave,onCancel}){
@@ -7458,7 +7982,10 @@ function OnlinePregForm({initial,lots,protocols,onSave,onCancel}){
 /* ─── SAÍDA DE ANIMAIS ONLINE (admin) ─── */
 function OnlineExits({user}){
   const{data:items,loading,error,reload}=useSupaQuery('animal_exits',{order:{column:'date',ascending:false}});
+  const{data:animals}=useSupaQuery('animals');
+  const{data:lots}=useSupaQuery('lots');
   const[showForm,setShowForm]=useState(false);
+  const[bulkMode,setBulkMode]=useState(false);
   const[seasonFilter,setSeasonFilter]=useState('all');
 
   async function save(data){
@@ -7496,8 +8023,11 @@ function OnlineExits({user}){
   },[items,seasonFilter]);
 
   return <OnlinePage title="Saída de Animais" subtitle={filtered.length+' saídas'+(seasonFilter!=='all'?' · safra '+seasonFilter:'')} icon="📤" loading={loading} error={error}
-    action={<Btn onClick={()=>setShowForm(true)}>+ Nova Saída</Btn>}>
-    <Alert type="info">📋 Registre saídas por venda, morte, consumo ou doação. Animal é marcado como SAIU no Inventário.</Alert>
+    action={<div style={{display:'flex',gap:6}}>
+      <Btn variant="secondary" size="sm" onClick={()=>setBulkMode(true)}>📋 Em lote</Btn>
+      <Btn size="sm" onClick={()=>setShowForm(true)}>+ Nova Saída</Btn>
+    </div>}>
+    <Alert type="info">📋 Registre saídas por venda, morte, consumo ou doação. Animal é marcado como SAIU no Inventário.<br/>💡 Use o botão <strong>"📋 Em lote"</strong> para registrar várias saídas de uma vez (ex: venda de 15 vacas).</Alert>
     <Card style={{marginBottom:12,padding:12}}>
       <Field label="📅 Filtrar por safra"><SeasonFilter value={seasonFilter} onChange={setSeasonFilter}/></Field>
     </Card>
@@ -7521,6 +8051,9 @@ function OnlineExits({user}){
     <Modal open={showForm} onClose={()=>setShowForm(false)} title="Nova Saída" size="lg">
       <OnlineExitForm REASONS={REASONS} onSave={save} onCancel={()=>setShowForm(false)}/>
     </Modal>
+    <Modal open={bulkMode} onClose={()=>setBulkMode(false)} title="📋 Saída em Lote" size="lg">
+      <OnlineBulkExit animals={animals} lots={lots} REASONS={REASONS} onClose={()=>{setBulkMode(false);reload();}}/>
+    </Modal>
   </OnlinePage>;
 }
 
@@ -7541,6 +8074,204 @@ function OnlineExitForm({REASONS,onSave,onCancel}){
     {f.reason==='morte'&&<Field label="Causa"><Select value={f.death_cause} onChange={e=>s('death_cause',e.target.value)}>{H.DCAUSES.map(c=><option key={c}>{c}</option>)}</Select></Field>}
     <Field label="Observações"><Textarea value={f.notes} onChange={e=>s('notes',e.target.value)}/></Field>
     <FormActions onSave={()=>{if(!f.identifier)return alert('Selecione o animal');onSave(f);}} onCancel={onCancel} saveLabel="Registrar Saída"/>
+  </>;
+}
+
+/* ─── SAÍDA EM LOTE: múltiplos animais de uma vez ─── */
+function OnlineBulkExit({animals,lots,REASONS,onClose}){
+  const[date,setDate]=useState(TODAY);
+  const[reason,setReason]=useState('venda');
+  const[buyer,setBuyer]=useState('');
+  const[totalValue,setTotalValue]=useState('');
+  const[perHeadValue,setPerHeadValue]=useState('');
+  const[valueMode,setValueMode]=useState('total'); // 'total' ou 'per_head'
+  const[deathCause,setDeathCause]=useState('Desconhecida');
+  const[notes,setNotes]=useState('');
+  const[season,setSeason]=useState(H.activeSeason());
+  const[filterLot,setFilterLot]=useState('');
+  const[filterType,setFilterType]=useState('');
+  const[query,setQuery]=useState('');
+  const[selected,setSelected]=useState({});
+  const[saving,setSaving]=useState(false);
+  const[result,setResult]=useState(null);
+
+  // Animais ativos disponíveis
+  const activeAnimals=useMemo(()=>{
+    return animals.filter(a=>(a.status||'ativo')==='ativo').sort((a,b)=>(a.identifier||'').localeCompare(b.identifier||'',undefined,{numeric:true,sensitivity:'base'}));
+  },[animals]);
+
+  // Filtros aplicados
+  const filtered=useMemo(()=>{
+    return activeAnimals.filter(a=>{
+      if(filterLot&&a.lot_id!==filterLot)return false;
+      if(filterType&&a.type!==filterType)return false;
+      if(query){
+        const q=query.toLowerCase();
+        if(!(a.identifier||'').toLowerCase().includes(q)&&!(a.farm_tag||'').toLowerCase().includes(q))return false;
+      }
+      return true;
+    });
+  },[activeAnimals,filterLot,filterType,query]);
+
+  function toggle(id){setSelected(p=>{const n={...p};if(n[id])delete n[id];else n[id]=true;return n;});}
+  function selectAll(){const all={};filtered.forEach(a=>{all[a.id]=true;});setSelected(all);}
+  function selectNone(){setSelected({});}
+
+  const numSelected=Object.keys(selected).length;
+
+  // Valor por cabeça calculado
+  function getValuePerHead(){
+    if(valueMode==='per_head')return parseFloat(perHeadValue)||0;
+    if(valueMode==='total'&&totalValue&&numSelected>0)return parseFloat(totalValue)/numSelected;
+    return 0;
+  }
+
+  async function saveAll(){
+    if(numSelected===0){alert('Selecione ao menos 1 animal.');return;}
+    if(reason==='venda'&&!buyer.trim()){if(!confirm('Comprador não informado. Prosseguir?'))return;}
+
+    const valuePerHead=getValuePerHead();
+    const msg='Registrar saída de '+numSelected+' animal(is)?\n\n'+
+      '📅 Data: '+H.fmtDate(date)+'\n'+
+      '📤 Motivo: '+REASONS[reason].label+'\n'+
+      (reason==='venda'?'💰 '+(valueMode==='total'?'Valor total: '+H.fmtMoney(parseFloat(totalValue)||0)+' ('+H.fmtMoney(valuePerHead)+'/cab)':'Valor/cab: '+H.fmtMoney(valuePerHead)+' (total: '+H.fmtMoney(valuePerHead*numSelected)+')')+'\n':'')+
+      (reason==='morte'?'⚠ Causa: '+deathCause+'\n':'')+
+      '\nIsso vai marcar todos como "saiu" no Inventário.';
+    if(!confirm(msg))return;
+
+    setSaving(true);
+    const ok=[];const errs=[];
+    const ids=Object.keys(selected);
+    const catMap={'Vaca':'Vacas','Bezerro':'Bezerros','Touro':'Touros','Novilha':'Novilhas','Garrote':'Garrotes'};
+
+    for(const id of ids){
+      const animal=animals.find(a=>a.id===id);
+      if(!animal){errs.push({id,error:'animal não encontrado'});continue;}
+      if(animal.status==='saiu'){errs.push({id:animal.identifier,error:'já saiu'});continue;}
+      try{
+        let deathId=null;
+        if(reason==='morte'){
+          const d=await window.SupaDB.insert('deaths',{
+            animal_id:animal.identifier,
+            category:catMap[animal.type]||'Outro',
+            lot_id:animal.lot_id,
+            death_date:date,
+            cause:deathCause||'Desconhecida',
+            fact:notes||'',
+            notes:'Criado a partir de Saída em Lote',
+            season,
+          });
+          deathId=d.id;
+        }
+        await window.SupaDB.insert('animal_exits',{
+          animal_id:animal.id,
+          identifier:animal.identifier,
+          date,
+          reason,
+          buyer:buyer||null,
+          sale_value:reason==='venda'?valuePerHead:null,
+          death_cause:reason==='morte'?deathCause:null,
+          notes:notes||'Saída em lote',
+          death_id:deathId,
+          season,
+        });
+        await window.SupaDB.update('animals',animal.id,{status:'saiu',exit_date:date,exit_reason:reason});
+        ok.push(animal.identifier);
+      }catch(e){errs.push({id:animal.identifier,error:e.message});}
+    }
+    setResult({ok,errs});
+    setSaving(false);
+  }
+
+  if(result){
+    return <>
+      <Alert type={result.errs.length===0?'success':'warning'}>
+        ✅ <strong>{result.ok.length} saída(s) registrada(s)</strong>
+        {result.errs.length>0&&<><br/>⚠ {result.errs.length} erro(s) (ver detalhes abaixo)</>}
+      </Alert>
+      {result.errs.length>0&&<Card style={{maxHeight:200,overflowY:'auto',marginBottom:12,padding:12}}>
+        {result.errs.map((e,i)=><div key={i} style={{fontSize:12,marginBottom:4}}>• <strong>{e.id}:</strong> {e.error}</div>)}
+      </Card>}
+      <Btn fullWidth onClick={onClose}>Fechar</Btn>
+    </>;
+  }
+
+  // Lista de tipos únicos dos animais ativos
+  const types=[...new Set(activeAnimals.map(a=>a.type))].sort();
+
+  return <>
+    <Alert type="info">📋 <strong>Saída em lote:</strong> Defina os dados (data, motivo, valor) e selecione os animais. Tudo é registrado de uma vez.</Alert>
+
+    <FormRow>
+      <Field label="Data" required><Input type="date" value={date} onChange={e=>setDate(e.target.value)}/></Field>
+      <SeasonField value={season} onChange={setSeason}/>
+    </FormRow>
+
+    <Field label="Motivo da Saída" required><Select value={reason} onChange={e=>setReason(e.target.value)}>
+      {Object.entries(REASONS).map(([k,r])=><option key={k} value={k}>{r.icon} {r.label}</option>)}
+    </Select></Field>
+
+    {reason==='venda'&&<>
+      <Field label="Comprador"><Input value={buyer} onChange={e=>setBuyer(e.target.value)} placeholder="Ex: João Silva / Frigorífico XYZ"/></Field>
+      <div style={{display:'flex',gap:4,marginBottom:8,background:'#f3f4f6',padding:4,borderRadius:8}}>
+        <button type="button" onClick={()=>setValueMode('total')} style={{flex:1,padding:8,background:valueMode==='total'?'#fff':'transparent',border:'none',borderRadius:6,cursor:'pointer',fontSize:12,fontWeight:valueMode==='total'?600:400}}>💰 Valor TOTAL (divide entre os animais)</button>
+        <button type="button" onClick={()=>setValueMode('per_head')} style={{flex:1,padding:8,background:valueMode==='per_head'?'#fff':'transparent',border:'none',borderRadius:6,cursor:'pointer',fontSize:12,fontWeight:valueMode==='per_head'?600:400}}>💵 Valor POR CABEÇA</button>
+      </div>
+      {valueMode==='total'?
+        <Field label="Valor total da venda (R$)" hint={numSelected>0&&totalValue?'≈ '+H.fmtMoney(parseFloat(totalValue)/numSelected)+' por cabeça':''}><Input type="number" step="0.01" value={totalValue} onChange={e=>setTotalValue(e.target.value)} placeholder="Ex: 75000"/></Field>
+      :
+        <Field label="Valor por cabeça (R$)" hint={numSelected>0&&perHeadValue?'Total: '+H.fmtMoney(parseFloat(perHeadValue)*numSelected):''}><Input type="number" step="0.01" value={perHeadValue} onChange={e=>setPerHeadValue(e.target.value)} placeholder="Ex: 5000"/></Field>
+      }
+    </>}
+
+    {reason==='morte'&&<Field label="Causa"><Select value={deathCause} onChange={e=>setDeathCause(e.target.value)}>{H.DCAUSES.map(c=><option key={c}>{c}</option>)}</Select></Field>}
+
+    <Field label="Observações"><Textarea value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Observações sobre essa saída"/></Field>
+
+    <Card style={{marginBottom:12,padding:12,background:'#f9fafb'}}>
+      <p style={{fontSize:12,fontWeight:600,marginBottom:8,color:'#374151'}}>🔍 Filtrar animais:</p>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
+        <Select value={filterLot} onChange={e=>setFilterLot(e.target.value)}>
+          <option value="">Todos os lotes</option>
+          {lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
+        </Select>
+        <Select value={filterType} onChange={e=>setFilterType(e.target.value)}>
+          <option value="">Todos os tipos</option>
+          {types.map(t=><option key={t} value={t}>{t}</option>)}
+        </Select>
+      </div>
+      <Input value={query} onChange={e=>setQuery(e.target.value)} placeholder="🔎 Buscar por brinco/identificador..."/>
+    </Card>
+
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+      <strong style={{fontSize:13}}>Selecionados: {numSelected}/{filtered.length} (de {activeAnimals.length} ativos)</strong>
+      <div style={{display:'flex',gap:6}}>
+        <button type="button" onClick={selectAll} style={{padding:'4px 8px',fontSize:11,background:'#dbeafe',border:'1px solid #93c5fd',borderRadius:6,cursor:'pointer'}}>Todos visíveis</button>
+        <button type="button" onClick={selectNone} style={{padding:'4px 8px',fontSize:11,background:'#fff',border:'1px solid #d1d5db',borderRadius:6,cursor:'pointer'}}>Nenhum</button>
+      </div>
+    </div>
+
+    <div style={{maxHeight:300,overflowY:'auto',border:'1px solid #e5e7eb',borderRadius:8,marginBottom:12}}>
+      {filtered.length===0?<div style={{padding:16,textAlign:'center',color:'#6b7280',fontSize:12}}>Nenhum animal encontrado com esses filtros</div>:
+        filtered.map(a=>{
+          const sel=!!selected[a.id];
+          const lot=lots.find(l=>l.id===a.lot_id);
+          return <div key={a.id} onClick={()=>toggle(a.id)} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',borderBottom:'1px solid #f3f4f6',background:sel?'#dcfce7':'#fff',cursor:'pointer'}}>
+            <input type="checkbox" checked={sel} onChange={()=>{}} style={{width:18,height:18}}/>
+            <div style={{flex:1,minWidth:0}}>
+              <strong style={{fontSize:13}}>{a.identifier}</strong>
+              <span style={{fontSize:11,color:'#6b7280',marginLeft:6}}>{a.type} · {a.race} · {lot?.name||'sem lote'}</span>
+            </div>
+          </div>;
+        })
+      }
+    </div>
+
+    <FormActions
+      onSave={saveAll}
+      onCancel={onClose}
+      saveLabel={saving?'⏳ Registrando...':'💾 Registrar saída de '+numSelected+' '+(numSelected===1?'animal':'animais')}
+    />
   </>;
 }
 
@@ -7730,7 +8461,7 @@ function OnlineHealthManagements({user}){
     catch(e){alert('Erro: '+e.message);}
   }
 
-  const filtered=query?items.filter(m=>(m.product+' '+m.type+' '+m.observations).toLowerCase().includes(query.toLowerCase())):items;
+  const filtered=query?items.filter(m=>(m.product+' '+m.type+' '+(m.notes||m.observations||'')).toLowerCase().includes(query.toLowerCase())):items;
 
   return <OnlinePage title="Manejos Sanitários" subtitle={items.length+' registros'} icon="💉" loading={loading} error={error}
     action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Novo</Btn>}>
@@ -7758,7 +8489,7 @@ function OnlineHealthManagements({user}){
 }
 
 function OnlineHealthForm({initial,lots,onSave,onCancel}){
-  const[f,setF]=useState({type:'Vacinação',product:'',dose:'',date:TODAY,lot_id:'',category:'Vacas',animals_count:0,observations:'',...initial});
+  const[f,setF]=useState({type:'Vacinação',product:'',dose:'',date:TODAY,lot_id:'',category:'Vacas',animals_count:0,notes:'',season:H.activeSeason(),...initial,...(initial&&initial.observations&&!initial.notes?{notes:initial.observations}:{})});
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
   return <>
     <FormRow>
@@ -7773,8 +8504,11 @@ function OnlineHealthForm({initial,lots,onSave,onCancel}){
       <Field label="Lote"><Select value={f.lot_id||''} onChange={e=>s('lot_id',e.target.value||null)}><option value="">—</option>{lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
       <Field label="Categoria"><Select value={f.category} onChange={e=>s('category',e.target.value)}>{H.CATS.map(c=><option key={c}>{c}</option>)}</Select></Field>
     </FormRow>
-    <Field label="Nº Animais Tratados"><Input type="number" value={f.animals_count||0} onChange={e=>s('animals_count',parseInt(e.target.value)||0)}/></Field>
-    <Field label="Observações"><Textarea value={f.observations||''} onChange={e=>s('observations',e.target.value)}/></Field>
+    <FormRow>
+      <Field label="Nº Animais Tratados"><Input type="number" value={f.animals_count||0} onChange={e=>s('animals_count',parseInt(e.target.value)||0)}/></Field>
+      <SeasonField value={f.season} onChange={v=>s('season',v)}/>
+    </FormRow>
+    <Field label="Observações"><Textarea value={f.notes||''} onChange={e=>s('notes',e.target.value)}/></Field>
     <FormActions onSave={()=>onSave(f)} onCancel={onCancel}/>
   </>;
 }
@@ -7825,7 +8559,7 @@ function OnlineHerbicide({user}){
 }
 
 function OnlineHerbicideForm({initial,pastures,onSave,onCancel}){
-  const[f,setF]=useState({date:TODAY,pasture_id:'',product:'',dose:'',area_ha:'',observations:'',...initial});
+  const[f,setF]=useState({date:TODAY,pasture_id:'',product:'',dose:'',area_ha:'',notes:'',...initial,...(initial&&initial.observations&&!initial.notes?{notes:initial.observations}:{})});
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
   return <>
     <FormRow>
@@ -7837,7 +8571,7 @@ function OnlineHerbicideForm({initial,pastures,onSave,onCancel}){
       <Field label="Dose"><Input value={f.dose||''} onChange={e=>s('dose',e.target.value)} placeholder="Ex: 3 L/ha"/></Field>
     </FormRow>
     <Field label="Área aplicada (ha)"><Input type="number" step="0.01" value={f.area_ha||''} onChange={e=>s('area_ha',parseFloat(e.target.value)||null)}/></Field>
-    <Field label="Observações"><Textarea value={f.observations||''} onChange={e=>s('observations',e.target.value)}/></Field>
+    <Field label="Observações"><Textarea value={f.notes||''} onChange={e=>s('notes',e.target.value)}/></Field>
     <FormActions onSave={()=>{if(!f.product)return alert('Produto obrigatório');onSave(f);}} onCancel={onCancel}/>
   </>;
 }
@@ -7890,7 +8624,7 @@ function OnlineMineral({user}){
 }
 
 function OnlineMineralForm({initial,lots,pastures,onSave,onCancel}){
-  const[f,setF]=useState({date:TODAY,product:'',quantity:'',unit:'kg',lot_id:'',pasture_id:'',observations:'',...initial});
+  const[f,setF]=useState({date:TODAY,product:'',quantity:'',unit:'kg',lot_id:'',pasture_id:'',notes:'',...initial,...(initial&&initial.observations&&!initial.notes?{notes:initial.observations}:{})});
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
   return <>
     <FormRow>
@@ -7905,7 +8639,7 @@ function OnlineMineralForm({initial,lots,pastures,onSave,onCancel}){
       <Field label="Lote"><Select value={f.lot_id||''} onChange={e=>s('lot_id',e.target.value||null)}><option value="">—</option>{lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
       <Field label="Pasto"><Select value={f.pasture_id||''} onChange={e=>s('pasture_id',e.target.value||null)}><option value="">—</option>{pastures.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</Select></Field>
     </FormRow>
-    <Field label="Observações"><Textarea value={f.observations||''} onChange={e=>s('observations',e.target.value)}/></Field>
+    <Field label="Observações"><Textarea value={f.notes||''} onChange={e=>s('notes',e.target.value)}/></Field>
     <FormActions onSave={()=>{if(!f.product||!f.quantity)return alert('Produto e quantidade obrigatórios');onSave(f);}} onCancel={onCancel}/>
   </>;
 }
@@ -7957,7 +8691,7 @@ function OnlineFeces({user}){
 }
 
 function OnlineFecesForm({initial,lots,pastures,onSave,onCancel}){
-  const[f,setF]=useState({date:TODAY,lot_id:'',pasture_id:'',opg:'',parasites_found:'',recommendation:'',observations:'',...initial});
+  const[f,setF]=useState({date:TODAY,lot_id:'',pasture_id:'',opg:'',parasites_found:'',recommendation:'',notes:'',...initial,...(initial&&initial.observations&&!initial.notes?{notes:initial.observations}:{})});
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
   return <>
     <FormRow>
@@ -7970,7 +8704,7 @@ function OnlineFecesForm({initial,lots,pastures,onSave,onCancel}){
     </FormRow>
     <Field label="Parasitas encontrados"><Input value={f.parasites_found||''} onChange={e=>s('parasites_found',e.target.value)} placeholder="Ex: Haemonchus, Trichostrongylus..."/></Field>
     <Field label="Recomendação"><Textarea value={f.recommendation||''} onChange={e=>s('recommendation',e.target.value)}/></Field>
-    <Field label="Observações"><Textarea value={f.observations||''} onChange={e=>s('observations',e.target.value)}/></Field>
+    <Field label="Observações"><Textarea value={f.notes||''} onChange={e=>s('notes',e.target.value)}/></Field>
     <FormActions onSave={()=>onSave(f)} onCancel={onCancel}/>
   </>;
 }
@@ -8083,51 +8817,179 @@ function OnlineSearch({user,onNav}){
 }
 
 /* ─── EXPORTAÇÃO CSV ONLINE ─── */
+/* Mapa de colunas amigáveis: campo técnico → [campo, label PT, tipo]
+   tipo: 'date' | 'money' | 'number' | 'text'  */
+const EXPORT_COLUMNS={
+  animals:[
+    ['identifier','Identificador','text'],['farm_tag','Brinco Fazenda','text'],['official_tag','Brinco CIDASC','text'],
+    ['type','Tipo','text'],['sex','Sexo','text'],['race','Raça','text'],['birth_date','Nascimento','date'],
+    ['status','Status','text'],['father','Pai','text'],['mother','Mãe','text'],
+    ['paternal_grandfather','Avô Paterno','text'],['paternal_grandmother','Avó Paterna','text'],
+    ['maternal_grandfather','Avô Materno','text'],['maternal_grandmother','Avó Materna','text'],
+    ['notes','Observações','text'],
+  ],
+  pastures:[['name','Nome','text'],['area_ha','Área (ha)','number'],['capacity','Capacidade','number'],['grass_type','Tipo de Capim','text'],['status','Status','text'],['notes','Observações','text']],
+  lots:[['name','Nome','text'],['category','Categoria','text'],['description','Descrição','text'],['notes','Observações','text']],
+  births:[
+    ['calf_id','Bezerro','text'],['mother_id','Mãe','text'],['bull_name','Pai/Touro','text'],
+    ['calf_sex','Sexo','text'],['calf_race','Raça','text'],['birth_weight','Peso (kg)','number'],
+    ['birth_date','Data Nasc.','date'],['season','Safra','text'],['medications','Medicações','text'],['notes','Observações','text'],
+  ],
+  deaths:[['animal_id','Animal','text'],['category','Categoria','text'],['death_date','Data Morte','date'],['cause','Causa','text'],['season','Safra','text'],['fact','Detalhes','text'],['notes','Observações','text']],
+  weighings:[['animal_id','Animal','text'],['weight','Peso (kg)','number'],['date','Data','date'],['category','Categoria','text'],['season','Safra','text'],['notes','Observações','text']],
+  reproductive_protocols:[
+    ['cow_id','Vaca','text'],['date','Data IATF','date'],['protocol_name','Protocolo','text'],
+    ['semen_bull','Touro/Sêmen','text'],['bull_race','Raça Touro','text'],
+    ['repasse_date','Data Repasse','date'],['repasse_bull','Touro Repasse','text'],['repasse_race','Raça Repasse','text'],
+    ['season','Safra','text'],['notes','Observações','text'],
+  ],
+  pregnancy_diagnoses:[['cow_id','Vaca','text'],['diagnosis_date','Data Diagnóstico','date'],['result','Resultado','text'],['expected_birth_date','Parto Previsto','date'],['season','Safra','text'],['notes','Observações','text']],
+  health_managements:[['type','Tipo','text'],['product','Produto','text'],['dose','Dose','text'],['date','Data','date'],['category','Categoria','text'],['animals_count','Nº Animais','number'],['season','Safra','text'],['notes','Observações','text']],
+  herbicide_applications:[['product','Produto','text'],['date','Data','date'],['dose','Dose','text'],['area_ha','Área (ha)','number'],['observations','Observações','text']],
+  mineral_supplementations:[['product','Produto','text'],['date','Data','date'],['quantity','Quantidade','number'],['unit','Unidade','text'],['observations','Observações','text']],
+  feces_records:[['date','Data','date'],['opg','OPG','number'],['parasites_found','Parasitas','text'],['recommendation','Recomendação','text'],['observations','Observações','text']],
+  animal_exits:[['identifier','Animal','text'],['date','Data','date'],['reason','Motivo','text'],['buyer','Comprador','text'],['sale_value','Valor Venda','money'],['death_cause','Causa Morte','text'],['season','Safra','text'],['notes','Observações','text']],
+  revenues:[['date','Data','date'],['category','Categoria','text'],['quantity','Qtd Cabeças','number'],['sex','Sexo','text'],['sale_type','Tipo Venda','text'],['total_value','Valor Total','money'],['per_head_value','Valor/Cab','money'],['season','Safra','text'],['notes','Observações','text']],
+  costs:[['date','Data','date'],['type','Tipo','text'],['category','Categoria','text'],['subcategory','Subcategoria','text'],['value','Valor','money'],['description','Descrição','text'],['cost_center','Centro de Custo','text'],['season','Safra','text'],['notes','Observações','text']],
+  services:[['title','Título','text'],['category','Categoria','text'],['priority','Prioridade','text'],['status','Status','text'],['location','Local','text'],['due_date','Prazo','date'],['cost','Custo','money'],['description','Descrição','text'],['completion_notes','Conclusão','text'],['notes','Observações','text']],
+};
+
 function OnlineExport({user}){
   const[exporting,setExporting]=useState(false);
   const[lastExport,setLastExport]=useState(null);
 
+  function fmtCell(value,tipo){
+    if(value===null||value===undefined||value==='')return '';
+    if(tipo==='date'){
+      const s=String(value).split('T')[0];
+      if(/^\d{4}-\d{2}-\d{2}$/.test(s)){const[y,m,d]=s.split('-');return d+'/'+m+'/'+y;}
+      return s;
+    }
+    if(tipo==='money'){const n=parseFloat(value);return isNaN(n)?'':n;}
+    if(tipo==='number'){const n=parseFloat(value);return isNaN(n)?value:n;}
+    return String(value);
+  }
+
+  function buildSheet(rows,colsDef){
+    let cols=colsDef?[...colsDef]:[];
+    if(rows.length>0){
+      const mapped=new Set(cols.map(c=>c[0]));
+      Object.keys(rows[0]).forEach(k=>{
+        if(['id','created_at','updated_at','sync_status','collaborator_id','user_id','lot_id','pasture_id','reported_by','assigned_to','completed_by','death_id','photo','cow_photo','calf_photo','image','reported_at','completed_at'].includes(k))return;
+        if(!mapped.has(k))cols.push([k,k,'text']);
+      });
+    }
+    if(cols.length===0)cols=[['(vazio)','(sem dados)','text']];
+
+    const headerRow=cols.map(c=>c[1]);
+    const dataRows=rows.map(row=>cols.map(c=>fmtCell(row[c[0]],c[2])));
+    const aoa=[headerRow,...dataRows];
+    const ws=XLSX.utils.aoa_to_sheet(aoa);
+
+    ws['!cols']=cols.map((c,i)=>{
+      let max=String(c[1]).length;
+      dataRows.forEach(r=>{const len=String(r[i]??'').length;if(len>max)max=len;});
+      return {wch:Math.min(Math.max(max+2,10),45)};
+    });
+    ws['!freeze']={xSplit:0,ySplit:1};
+    try{ws['!autofilter']={ref:XLSX.utils.encode_range({s:{r:0,c:0},e:{r:Math.max(dataRows.length,1),c:cols.length-1}})};}catch(e){}
+
+    for(let C=0;C<cols.length;C++){
+      const hAddr=XLSX.utils.encode_cell({r:0,c:C});
+      if(ws[hAddr]){
+        ws[hAddr].s={
+          fill:{patternType:'solid',fgColor:{rgb:'166534'}},
+          font:{color:{rgb:'FFFFFF'},bold:true,sz:11,name:'Calibri'},
+          alignment:{horizontal:'center',vertical:'center',wrapText:true},
+          border:{
+            top:{style:'thin',color:{rgb:'0F3D22'}},bottom:{style:'thin',color:{rgb:'0F3D22'}},
+            left:{style:'thin',color:{rgb:'0F3D22'}},right:{style:'thin',color:{rgb:'0F3D22'}},
+          },
+        };
+      }
+      for(let R=1;R<=dataRows.length;R++){
+        const addr=XLSX.utils.encode_cell({r:R,c:C});
+        if(!ws[addr])continue;
+        const zebra=(R%2===0);
+        ws[addr].s={
+          font:{sz:10,name:'Calibri',color:{rgb:'1F2937'}},
+          fill:{patternType:'solid',fgColor:{rgb:zebra?'F0FDF4':'FFFFFF'}},
+          alignment:{vertical:'center',wrapText:false},
+          border:{
+            top:{style:'hair',color:{rgb:'D1D5DB'}},bottom:{style:'hair',color:{rgb:'D1D5DB'}},
+            left:{style:'hair',color:{rgb:'E5E7EB'}},right:{style:'hair',color:{rgb:'E5E7EB'}},
+          },
+        };
+        // Moeda
+        if(cols[C][2]==='money'&&typeof ws[addr].v==='number'){
+          ws[addr].t='n';ws[addr].z='"R$" #,##0.00';
+          ws[addr].s.alignment={horizontal:'right',vertical:'center'};
+        }
+        // Números à direita
+        if(cols[C][2]==='number'&&typeof ws[addr].v==='number'){
+          ws[addr].s.alignment={horizontal:'right',vertical:'center'};
+        }
+        // Datas centralizadas
+        if(cols[C][2]==='date'){
+          ws[addr].s.alignment={horizontal:'center',vertical:'center'};
+        }
+      }
+    }
+    // Altura do cabeçalho
+    ws['!rows']=[{hpt:24},...dataRows.map(()=>({hpt:18}))];
+    return ws;
+  }
+
   async function exportTable(table,label){
+    if(typeof XLSX==='undefined'){alert('Biblioteca Excel não carregou. Recarregue (Ctrl+F5).');return;}
     setExporting(true);
     try{
       const data=await window.SupaDB.get(table);
       if(!data||data.length===0){alert('Nenhum dado em '+label);setExporting(false);return;}
-      const headers=Object.keys(data[0]);
-      const csv=[
-        headers.join(','),
-        ...data.map(row=>headers.map(h=>{
-          const v=row[h];
-          if(v===null||v===undefined)return '';
-          const s=String(v).replace(/"/g,'""');
-          return s.includes(',')||s.includes('"')||s.includes('\n')?`"${s}"`:s;
-        }).join(','))
-      ].join('\n');
-      const bom='\uFEFF'; // UTF-8 BOM pra Excel reconhecer acentos
-      const blob=new Blob([bom+csv],{type:'text/csv;charset=utf-8;'});
-      const url=URL.createObjectURL(blob);
-      const a=document.createElement('a');
-      a.href=url;
-      a.download=`${table}-${TODAY}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
+      const ws=buildSheet(data,EXPORT_COLUMNS[table]);
+      const wb=XLSX.utils.book_new();
+      const sheetName=label.replace(/[^\wÀ-ú ]/g,'').trim().slice(0,28)||'Dados';
+      XLSX.utils.book_append_sheet(wb,ws,sheetName);
+      XLSX.writeFile(wb,table+'-'+TODAY+'.xlsx');
       setLastExport({table,label,count:data.length,when:new Date().toLocaleTimeString()});
     }catch(e){alert('Erro: '+e.message);}
     finally{setExporting(false);}
   }
 
   async function exportAll(){
-    if(!confirm('Exportar TODAS as tabelas em arquivos CSV separados?\n\nVai baixar vários arquivos.'))return;
-    const all=[
-      ['animals','Animais'],['pastures','Pastos'],['lots','Lotes'],
-      ['births','Nascimentos'],['deaths','Mortalidade'],['weighings','Pesagens'],
-      ['reproductive_protocols','Reprodução'],['pregnancy_diagnoses','Gestação'],
-      ['health_managements','Manejos'],['herbicide_applications','Herbicida'],
-      ['mineral_supplementations','Sal mineral'],['feces_records','Fezes'],
-      ['animal_exits','Saídas'],
-      ...(user.role==='admin'?[['revenues','Receitas'],['costs','Custos']]:[]),
-    ];
-    for(const[t,l]of all){await exportTable(t,l);await new Promise(r=>setTimeout(r,400));}
-    alert('✅ Exportação concluída!');
+    if(typeof XLSX==='undefined'){alert('Biblioteca Excel não carregou. Recarregue (Ctrl+F5).');return;}
+    if(!confirm('Exportar TODAS as tabelas em UM único arquivo Excel?\n\nCada tabela vira uma aba (planilha) separada.'))return;
+    setExporting(true);
+    try{
+      const all=[
+        ['animals','Animais'],['pastures','Pastos'],['lots','Lotes'],
+        ['births','Nascimentos'],['deaths','Mortalidade'],['weighings','Pesagens'],
+        ['reproductive_protocols','Reprodução'],['pregnancy_diagnoses','Gestação'],
+        ['health_managements','Manejos'],['herbicide_applications','Herbicida'],
+        ['mineral_supplementations','Sal mineral'],['feces_records','Fezes'],
+        ['animal_exits','Saídas'],['services','Serviços'],
+        ...(user.role==='admin'?[['revenues','Receitas'],['costs','Custos']]:[]),
+      ];
+      const wb=XLSX.utils.book_new();
+      let totalRecords=0;
+      const usedNames=new Set();
+      for(const[t,l]of all){
+        try{
+          setLastExport({table:t,label:'⏳ '+l+'...',count:0,when:new Date().toLocaleTimeString()});
+          const rows=await window.SupaDB.get(t);
+          const ws=buildSheet(rows||[],EXPORT_COLUMNS[t]);
+          let name=l.replace(/[^\wÀ-ú ]/g,'').trim().slice(0,28)||t;
+          while(usedNames.has(name))name=name.slice(0,26)+'_2';
+          usedNames.add(name);
+          XLSX.utils.book_append_sheet(wb,ws,name);
+          totalRecords+=(rows||[]).length;
+        }catch(e){console.warn('[export] erro em '+t+':',e.message);}
+      }
+      XLSX.writeFile(wb,'pecuaria-completo-'+TODAY+'.xlsx');
+      setLastExport({table:'__all__',label:'Excel completo',count:totalRecords,when:new Date().toLocaleTimeString()});
+      alert('✅ Excel completo gerado!\n\n'+all.length+' abas · '+totalRecords+' registros\n\n📁 pecuaria-completo-'+TODAY+'.xlsx');
+    }catch(e){alert('Erro: '+e.message);}
+    finally{setExporting(false);}
   }
 
   async function exportFullBackup(){
@@ -8247,27 +9109,29 @@ function OnlineExport({user}){
     tables.push(['costs','💵 Custos','red']);
   }
 
-  return <OnlinePage title="Exportar Dados" subtitle="Baixe planilhas CSV de cada tabela" icon="📥">
-    <Alert type="info">📊 Os arquivos CSV abrem perfeitamente no Excel, Google Sheets, LibreOffice etc.</Alert>
+  return <OnlinePage title="Exportar Dados" subtitle="Baixe planilhas Excel formatadas" icon="📥">
+    <Alert type="info">📊 Os arquivos saem em <strong>Excel (.xlsx)</strong> com colunas organizadas, cabeçalho colorido, nomes em português e valores formatados. Abrem no Excel, Google Sheets e LibreOffice.</Alert>
 
     <Card style={{marginBottom:12}}>
-      <CardHeader title="💾 Backup completo (JSON)" icon=""/>
+      <CardHeader title="📗 Excel completo (recomendado)" icon=""/>
       <div style={{padding:12}}>
         <p style={{fontSize:12,color:'#6b7280',marginBottom:10}}>
-          Baixa <strong>todos os dados do Supabase em um único arquivo JSON</strong>. 
-          Útil pra cópia de segurança fora da nuvem ou pra restaurar em outro projeto.
+          Gera <strong>um único arquivo Excel</strong> com todas as tabelas, cada uma em uma aba separada. Bonito e fácil de navegar.
         </p>
-        <Btn onClick={exportFullBackup} fullWidth disabled={exporting} variant="primary">
-          {exporting?'⏳ Gerando backup...':'💾 Baixar backup completo (JSON)'}
+        <Btn onClick={exportAll} fullWidth disabled={exporting} variant="primary">
+          {exporting?'⏳ Gerando Excel...':'📗 Baixar Excel completo (todas as abas)'}
         </Btn>
       </div>
     </Card>
 
     <Card style={{marginBottom:12}}>
-      <CardHeader title="Exportar tudo de uma vez (CSV)" icon="📦"/>
+      <CardHeader title="💾 Backup técnico (JSON)" icon=""/>
       <div style={{padding:12}}>
-        <Btn onClick={exportAll} fullWidth disabled={exporting} variant="secondary">
-          {exporting?'⏳ Exportando...':'📦 Baixar TODAS as planilhas CSV'}
+        <p style={{fontSize:12,color:'#6b7280',marginBottom:10}}>
+          Arquivo técnico com <strong>todos os dados crus</strong>. Use pra cópia de segurança ou restaurar em outro sistema (não é pra leitura).
+        </p>
+        <Btn onClick={exportFullBackup} fullWidth disabled={exporting} variant="secondary">
+          {exporting?'⏳ Gerando backup...':'💾 Baixar backup completo (JSON)'}
         </Btn>
       </div>
     </Card>
@@ -8277,12 +9141,12 @@ function OnlineExport({user}){
     </Alert>}
 
     <Card>
-      <CardHeader title="Exportar tabela individual" icon="📄"/>
+      <CardHeader title="Exportar tabela individual (Excel)" icon="📄"/>
       {tables.map(([t,l,c])=>
         <ListItem key={t}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
             <span style={{fontSize:13}}>{l}</span>
-            <Btn size="sm" variant="secondary" onClick={()=>exportTable(t,l)} disabled={exporting}>📥 Baixar</Btn>
+            <Btn size="sm" variant="secondary" onClick={()=>exportTable(t,l)} disabled={exporting}>📥 Baixar .xlsx</Btn>
           </div>
         </ListItem>
       )}
@@ -9606,6 +10470,7 @@ function App(){
   const[mode,setMode]=useState(null); // null, 'local', 'online'
   const[checkingSession,setCheckingSession]=useState(true);
   const[onlineUser,setOnlineUser]=useState(null);
+  const[operationChosen,setOperationChosen]=useState(false);
   const[onlinePage,setOnlinePage]=useState('online-dashboard');
 
   useEffect(()=>{
@@ -9623,6 +10488,7 @@ function App(){
           const profile=await window.SupaDB.restoreSession();
           if(profile){
             setOnlineUser(profile);
+            setOperationChosen(true); // já tem sessão, então operação já estava ok
             // Carregar safra global das configs
             try{
               const cfg=await window.SupaDB.getSettings();
@@ -9652,7 +10518,27 @@ function App(){
   }
   function backToModeSelector(){
     setMode(null);
+    setOperationChosen(false);
     localStorage.removeItem('pm_mode');
+  }
+
+  // Trocar operação: faz logout, limpa estado e reload pra reinicializar Supabase
+  async function handleSwitchOperation(){
+    if(!confirm('Trocar de operação?\n\nVocê será deslogado e poderá escolher outra operação. Recomendado se quiser ver outra fazenda/arrendamento.'))return;
+    try{await window.SupaDB.signOut();}catch{}
+    setOnlineUser(null);
+    setOperationChosen(false);
+  }
+
+  function handleOperationChosen(op){
+    // Se a operação ativa mudou, precisa recarregar a página pra reinicializar Supabase
+    const currentActiveId=window.ACTIVE_OPERATION?.id;
+    if(currentActiveId&&currentActiveId!==op.id){
+      // Vai reload pra Supabase reiniciar com nova URL/key
+      location.reload();
+      return;
+    }
+    setOperationChosen(true);
   }
 
   const handleLogin=u=>{setUser(u);setPage('dashboard');};
@@ -9695,7 +10581,9 @@ function App(){
 
   // ─── MODO ONLINE ───
   if(mode==='online'){
-    if(!onlineUser)return <OnlineLogin onLogin={handleOnlineLogin} onBackToMode={backToModeSelector}/>;
+    // Se ainda não escolheu operação: mostrar seletor
+    if(!operationChosen&&!onlineUser)return <OperationSelector onChoose={handleOperationChosen} onBackToMode={backToModeSelector}/>;
+    if(!onlineUser)return <OnlineLogin onLogin={handleOnlineLogin} onBackToMode={backToModeSelector} activeOp={window.ACTIVE_OPERATION} onChangeOp={()=>setOperationChosen(false)}/>;
     const onlineProps={user:onlineUser,onNav:handleOnlineNav};
     const ONLINE_PAGES={
       'online-dashboard':<OnlineDashboard {...onlineProps}/>,
@@ -9726,7 +10614,7 @@ function App(){
       'online-collaborators':<OnlineCollaborators {...onlineProps}/>,
       'online-settings':<OnlineSettings {...onlineProps} onLogout={handleOnlineLogout}/>,
     };
-    return <OnlineLayout user={onlineUser} page={onlinePage} onNav={handleOnlineNav} onLogout={handleOnlineLogout}>
+    return <OnlineLayout user={onlineUser} page={onlinePage} onNav={handleOnlineNav} onLogout={handleOnlineLogout} onSwitchOp={handleSwitchOperation}>
       {ONLINE_PAGES[onlinePage]||ONLINE_PAGES['online-dashboard']}
     </OnlineLayout>;
   }
